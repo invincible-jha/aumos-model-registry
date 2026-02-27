@@ -240,3 +240,114 @@ class IArtifactStorage(Protocol):
     ) -> None:
         """Delete all artifacts for a model version."""
         ...
+
+
+@runtime_checkable
+class IMLBOMGenerator(Protocol):
+    """Contract for CycloneDX ML Bill of Materials generation."""
+
+    async def generate(
+        self,
+        model_id: uuid.UUID,
+        version_id: uuid.UUID,
+        model_name: str,
+        tenant_id: uuid.UUID,
+        framework: str | None,
+        additional_components: list | None,
+        training_datasets: list | None,
+    ) -> dict:
+        """Generate a CycloneDX 1.5 ML-BOM dict for a model version."""
+        ...
+
+    async def export_json(self, bom: dict) -> str:
+        """Export a BOM dict as a formatted JSON string."""
+        ...
+
+    async def export_xml(self, bom: dict) -> str:
+        """Export a BOM dict as a CycloneDX XML string."""
+        ...
+
+    async def get_bom_version(self, version_id: uuid.UUID) -> int:
+        """Return the BOM version number for a model version."""
+        ...
+
+
+@runtime_checkable
+class IModelSemanticSearch(Protocol):
+    """Contract for semantic model discovery and search."""
+
+    async def search(
+        self,
+        tenant_id: uuid.UUID,
+        query: str,
+        tags: list | None,
+        framework: str | None,
+        model_type: str | None,
+        limit: int,
+    ) -> list[dict]:
+        """Execute a semantic search over model descriptions."""
+        ...
+
+    async def get_autocomplete_suggestions(
+        self,
+        tenant_id: uuid.UUID,
+        prefix: str,
+        limit: int,
+    ) -> list[str]:
+        """Return autocomplete suggestions for a query prefix."""
+        ...
+
+    async def get_popular_queries(
+        self,
+        tenant_id: uuid.UUID,
+        limit: int,
+    ) -> list[dict]:
+        """Return the most popular search queries for a tenant."""
+        ...
+
+    async def get_facets(self, tenant_id: uuid.UUID) -> dict:
+        """Return faceted search counts for framework and model_type dimensions."""
+        ...
+
+
+@runtime_checkable
+class IModelCostAttribution(Protocol):
+    """Contract for per-model cost tracking and reporting."""
+
+    async def get_version_cost_breakdown(
+        self,
+        version_id: uuid.UUID,
+        storage_months: int,
+    ) -> dict:
+        """Return a full cost breakdown for a single model version."""
+        ...
+
+    async def get_model_cost_summary(
+        self,
+        model_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+    ) -> dict:
+        """Aggregate costs across all versions of a model."""
+        ...
+
+    async def analyze_cost_trends(self, model_id: uuid.UUID) -> dict:
+        """Compute cost trend analysis across all versions of a model."""
+        ...
+
+    async def check_budget_alert(
+        self,
+        model_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        budget_usd: Decimal,
+    ) -> dict:
+        """Check whether a model's total cost has exceeded the alert threshold."""
+        ...
+
+    async def generate_cost_report(
+        self,
+        model_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        include_trends: bool,
+    ) -> dict:
+        """Generate a comprehensive cost report for a model."""
+        ...

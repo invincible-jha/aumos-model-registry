@@ -18,7 +18,10 @@ from aumos_model_registry.core.cost_engine import (
 from aumos_model_registry.core.interfaces import (
     IDeploymentRepository,
     IExperimentRepository,
+    IMLBOMGenerator,
+    IModelCostAttribution,
     IModelRepository,
+    IModelSemanticSearch,
     IVersionRepository,
 )
 from aumos_model_registry.core.ml_bom import generate_ml_bom
@@ -605,6 +608,244 @@ class ModelService:
         )
         await self._versions.set_ml_bom(version_id, bom)
         return bom
+
+
+class MLBOMService:
+    """Service for generating and exporting CycloneDX ML Bills of Materials.
+
+    Wraps the MLBOMGenerator adapter with tenant-level access guards and
+    on-demand generation with persistence back to the version repository.
+    """
+
+    def __init__(
+        self,
+        bom_generator: IMLBOMGenerator,
+        version_repo: IVersionRepository,
+    ) -> None:
+        """Initialise with injected dependencies.
+
+        Args:
+            bom_generator: ML-BOM generation adapter.
+            version_repo: Version repository for BOM persistence.
+        """
+        self._generator = bom_generator
+        self._versions = version_repo
+
+    async def get_or_generate_bom(
+        self,
+        model_id: uuid.UUID,
+        version_id: uuid.UUID,
+        model_name: str,
+        tenant_id: uuid.UUID,
+        framework: str | None = None,
+    ) -> dict:
+        """Return an existing BOM or generate and persist one on demand.
+
+        Args:
+            model_id: Parent model UUID.
+            version_id: Target version UUID.
+            model_name: Human-readable model name.
+            tenant_id: Owning tenant.
+            framework: Optional framework hint for component detection.
+
+        Returns:
+            CycloneDX ML-BOM dict.
+        """
+        version = await self._versions.get_by_id(version_id)
+        if version is not None and version.ml_bom is not None:
+            return version.ml_bom
+
+        bom = await self._generator.generate(
+            model_id=model_id,
+            version_id=version_id,
+            model_name=model_name,
+            tenant_id=tenant_id,
+            framework=framework,
+            additional_components=None,
+            training_datasets=None,
+        )
+        await self._versions.set_ml_bom(version_id, bom)
+        logger.info("ML-BOM generated and persisted", version_id=str(version_id))
+        return bom
+
+    async def export_bom_json(self, model_id: uuid.UUID, version_id: uuid.UUID) -> str:
+        """Return the JSON representation of a persisted BOM.
+
+        Args:
+            model_id: Parent model UUID.
+            version_id: Target version UUID.
+
+        Returns:
+            JSON string of the CycloneDX BOM.
+        """
+        version = await self._versions.get_by_id(version_id)
+        if version is None or version.ml_bom is None:
+            raise ValueError(f"No BOM found for version {version_id}")
+        return await self._generator.export_json(version.ml_bom)
+
+    async def export_bom_xml(self, model_id: uuid.UUID, version_id: uuid.UUID) -> str:
+        """Return the XML representation of a persisted BOM.
+
+        Args:
+            model_id: Parent model UUID.
+            version_id: Target version UUID.
+
+        Returns:
+            CycloneDX XML string.
+        """
+        version = await self._versions.get_by_id(version_id)
+        if version is None or version.ml_bom is None:
+            raise ValueError(f"No BOM found for version {version_id}")
+        return await self._generator.export_xml(version.ml_bom)
+
+
+class SemanticSearchService:
+    """Service for semantic model discovery within a tenant's model registry.
+
+    Delegates to the IModelSemanticSearch adapter with tenant-level validation
+    and search result formatting.
+    """
+
+    def __init__(self, search_adapter: IModelSemanticSearch) -> None:
+        """Initialise with injected search adapter.
+
+        Args:
+            search_adapter: Semantic search implementation.
+        """
+        self._search = search_adapter
+
+    async def search(
+        self,
+        tenant_id: uuid.UUID,
+        query: str,
+        tags: list | None = None,
+        framework: str | None = None,
+        model_type: str | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Search for models by natural language query.
+
+        Args:
+            tenant_id: Requesting tenant.
+            query: Natural language search query.
+            tags: Optional tag filter list.
+            framework: Optional framework filter.
+            model_type: Optional model_type filter.
+            limit: Maximum results.
+
+        Returns:
+            Ranked list of model search results.
+        """
+        return await self._search.search(
+            tenant_id=tenant_id,
+            query=query,
+            tags=tags,
+            framework=framework,
+            model_type=model_type,
+            limit=limit,
+        )
+
+    async def get_facets(self, tenant_id: uuid.UUID) -> dict:
+        """Return faceted search metadata for UI rendering.
+
+        Args:
+            tenant_id: Requesting tenant.
+
+        Returns:
+            Dict with framework and model_type facet counts.
+        """
+        return await self._search.get_facets(tenant_id=tenant_id)
+
+    async def suggest(
+        self,
+        tenant_id: uuid.UUID,
+        prefix: str,
+        limit: int = 8,
+    ) -> list[str]:
+        """Return autocomplete suggestions for a search prefix.
+
+        Args:
+            tenant_id: Requesting tenant.
+            prefix: Query prefix (minimum 2 characters).
+            limit: Maximum suggestions.
+
+        Returns:
+            List of suggestion strings.
+        """
+        return await self._search.get_autocomplete_suggestions(
+            tenant_id=tenant_id, prefix=prefix, limit=limit
+        )
+
+
+class CostAttributionService:
+    """Service for per-model cost tracking, analysis, and budget management.
+
+    Wraps the IModelCostAttribution adapter with tenant validation.
+    """
+
+    def __init__(self, cost_adapter: IModelCostAttribution) -> None:
+        """Initialise with injected cost attribution adapter.
+
+        Args:
+            cost_adapter: Cost tracking implementation.
+        """
+        self._costs = cost_adapter
+
+    async def get_version_cost(
+        self,
+        version_id: uuid.UUID,
+        storage_months: int = 1,
+    ) -> dict:
+        """Return cost breakdown for a specific model version.
+
+        Args:
+            version_id: Target version UUID.
+            storage_months: Months to amortise storage over.
+
+        Returns:
+            Cost breakdown dict.
+        """
+        return await self._costs.get_version_cost_breakdown(
+            version_id=version_id, storage_months=storage_months
+        )
+
+    async def get_model_cost_report(
+        self,
+        model_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+    ) -> dict:
+        """Generate a comprehensive cost report for a model.
+
+        Args:
+            model_id: Parent model UUID.
+            tenant_id: Owning tenant.
+
+        Returns:
+            Full cost report including summary and trends.
+        """
+        return await self._costs.generate_cost_report(
+            model_id=model_id, tenant_id=tenant_id, include_trends=True
+        )
+
+    async def check_budget(
+        self,
+        model_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        budget_usd: Decimal,
+    ) -> dict:
+        """Check model cost against a budget allocation.
+
+        Args:
+            model_id: Parent model UUID.
+            tenant_id: Owning tenant.
+            budget_usd: Budget cap in USD.
+
+        Returns:
+            Budget alert dict.
+        """
+        return await self._costs.check_budget_alert(
+            model_id=model_id, tenant_id=tenant_id, budget_usd=budget_usd
+        )
 
 
 class ExperimentService:
