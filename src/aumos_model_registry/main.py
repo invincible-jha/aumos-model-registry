@@ -12,6 +12,7 @@ from aumos_common.observability import get_logger
 
 from aumos_model_registry.adapters.kafka import ModelRegistryEventPublisher
 from aumos_model_registry.adapters.minio_client import MinioArtifactClient
+from aumos_model_registry.api.decommission_routes import decommission_router
 from aumos_model_registry.api.router import router
 from aumos_model_registry.settings import Settings
 
@@ -77,3 +78,4 @@ app: FastAPI = create_app(
 )
 
 app.include_router(router, prefix="/api/v1")
+app.include_router(decommission_router, prefix="/api/v1")

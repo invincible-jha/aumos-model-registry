@@ -9,6 +9,7 @@ from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     ForeignKey,
     Integer,
     Numeric,
@@ -242,4 +243,169 @@ class ExperimentRun(Base):
 
     experiment: Mapped["Experiment"] = relationship(
         "Experiment", back_populates="runs"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Model Provenance Chain (P1.2)
+# ---------------------------------------------------------------------------
+
+
+class ModelProvenanceChain(AumOSModel):
+    """Cryptographic chain of custody for an AI model asset.
+
+    Records the complete provenance lifecycle from training dataset through
+    deployment and inference. Each link in the chain is signed with Ed25519
+    and SHA-256 hash-linked to the previous link, making the chain tamper-evident.
+
+    Table: reg_model_provenance_chains
+    """
+
+    __tablename__ = "reg_model_provenance_chains"
+
+    model_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=False,
+        index=True,
+        comment="ID of the model whose provenance this chain tracks",
+    )
+    model_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=True,
+        index=True,
+        comment="Specific model version if applicable",
+    )
+    chain_status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="active",
+        comment="active | sealed | revoked",
+    )
+    is_verified: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        comment="Whether the full chain has been cryptographically verified",
+    )
+    head_link_hash: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        comment="SHA-256 hash of the most recently appended link",
+    )
+    metadata_: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        name="metadata",
+        comment="Arbitrary context metadata for the chain",
+    )
+
+    links: Mapped[list["ProvenanceChainLink"]] = relationship(
+        "ProvenanceChainLink",
+        back_populates="chain",
+        cascade="all, delete-orphan",
+        order_by="ProvenanceChainLink.sequence_number",
+    )
+
+
+class ProvenanceChainLink(AumOSModel):
+    """A single tamper-evident link in a model provenance chain.
+
+    Each link records one stage in the model lifecycle (e.g., training dataset
+    ingestion, training run, validation). Links are hash-chained: the
+    ``previous_link_hash`` of each link equals the ``link_hash`` of its
+    predecessor, forming an immutable chain. The ``signature`` field holds
+    an Ed25519 signature over the canonical JSON of the link payload.
+
+    Table: reg_provenance_chain_links
+    """
+
+    __tablename__ = "reg_provenance_chain_links"
+
+    chain_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("reg_model_provenance_chains.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    sequence_number: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        comment="1-based position in the chain; must be monotonically increasing",
+    )
+    link_type: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        comment=(
+            "training_dataset | training_run | model_artifact | "
+            "validation_results | approval_decision | deployment_record | inference_log"
+        ),
+    )
+    payload: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        comment="Structured data describing this lifecycle stage",
+    )
+    link_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        comment="SHA-256 hash of (previous_link_hash + canonical JSON payload)",
+    )
+    previous_link_hash: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        comment="Hash of the predecessor link; NULL for the genesis link",
+    )
+    signature: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        comment="Base64-encoded Ed25519 signature over the canonical link JSON",
+    )
+    signed_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=False,
+        comment="UUID of the public key record (reg_provenance_public_keys) used to sign",
+    )
+    actor_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=True,
+        comment="User/service that created this link",
+    )
+
+    chain: Mapped["ModelProvenanceChain"] = relationship(
+        "ModelProvenanceChain", back_populates="links"
+    )
+
+
+class ProvenancePublicKey(AumOSModel):
+    """Registered Ed25519 public key used to verify provenance chain signatures.
+
+    Tenants register one or more Ed25519 public keys. Each key is identified
+    by a UUID. Chain link signatures reference ``ProvenancePublicKey.id``.
+
+    Table: reg_provenance_public_keys
+    """
+
+    __tablename__ = "reg_provenance_public_keys"
+
+    key_label: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        comment="Human-readable label for the key (e.g., 'mlops-pipeline-prod')",
+    )
+    public_key_pem: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        comment="PEM-encoded Ed25519 public key",
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        comment="Whether this key is currently trusted for signing",
+    )
+    revoked_at: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="ISO-8601 timestamp of revocation, if applicable",
     )
