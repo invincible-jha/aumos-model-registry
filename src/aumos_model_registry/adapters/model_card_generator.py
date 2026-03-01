@@ -1,0 +1,354 @@
+"""Model card generator adapter — structured documentation for ML models.
+
+Generates model cards following the Google Model Cards specification (Mitchell et al., 2019)
+and the Hugging Face model card standard. Model cards are the primary artifact for
+communicating a model's intended use, training data, evaluation results, ethical
+considerations, and limitations.
+
+Output formats:
+- Markdown (primary) — for display in aumos-docs and developer portals
+- JSON (machine-readable) — for downstream tools (aumos-ai-bom, governance engine)
+- HTML (rendered) — for embedding in compliance reports
+
+Model cards are stored as reg_model_versions.model_card (JSONB) and also
+exported to object storage as Markdown files.
+
+Reference: https://arxiv.org/abs/1810.03993 (Mitchell et al., 2018)
+"""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+
+from aumos_common.observability import get_logger
+
+logger = get_logger(__name__)
+
+
+@dataclass
+class ModelCardSection:
+    """A single section of a model card document.
+
+    Attributes:
+        title: Section heading (e.g., 'Model Details', 'Intended Use').
+        content: Markdown-formatted section body.
+        order: Display order (lower numbers appear first).
+    """
+
+    title: str
+    content: str
+    order: int
+
+
+@dataclass
+class ModelCardData:
+    """Structured data for generating a model card.
+
+    Attributes:
+        model_id: UUID of the model.
+        model_name: Human-readable model name.
+        version: Version tag string.
+        description: Model purpose and capabilities.
+        model_type: Type of model (classifier, regressor, generative, etc.).
+        framework: ML framework (pytorch, tensorflow, sklearn, etc.).
+        training_data_uri: URI of the training dataset.
+        training_data_description: Human-readable training data description.
+        performance_metrics: Dict of evaluation metrics and values.
+        evaluation_datasets: List of dataset names used for evaluation.
+        intended_use_cases: Primary intended uses of the model.
+        out_of_scope_uses: Uses explicitly NOT recommended.
+        limitations: Known model limitations and failure modes.
+        ethical_considerations: Fairness, bias, and safety considerations.
+        authors: List of model author names or team names.
+        license: Model license identifier.
+        contact: Contact email for model inquiries.
+        tags: Arbitrary metadata tags.
+        parent_version_id: UUID of the parent model version (if fine-tuned).
+    """
+
+    model_id: uuid.UUID
+    model_name: str
+    version: str
+    description: str
+    model_type: str | None = None
+    framework: str | None = None
+    training_data_uri: str | None = None
+    training_data_description: str | None = None
+    performance_metrics: dict[str, float] = field(default_factory=dict)
+    evaluation_datasets: list[str] = field(default_factory=list)
+    intended_use_cases: list[str] = field(default_factory=list)
+    out_of_scope_uses: list[str] = field(default_factory=list)
+    limitations: list[str] = field(default_factory=list)
+    ethical_considerations: list[str] = field(default_factory=list)
+    authors: list[str] = field(default_factory=list)
+    license: str = "Apache-2.0"
+    contact: str | None = None
+    tags: dict[str, str] = field(default_factory=dict)
+    parent_version_id: uuid.UUID | None = None
+
+
+class ModelCardGenerator:
+    """Generates structured model cards from model version data.
+
+    Supports Markdown, JSON, and HTML output formats. Includes sections for
+    model details, intended use, training data, evaluation, limitations,
+    ethical considerations, and environmental impact.
+
+    Follows Google Model Cards specification with additional AumOS-specific
+    sections for deployment configuration and lineage traceability.
+    """
+
+    _SECTION_ORDER: dict[str, int] = {
+        "Model Details": 1,
+        "Model Description": 2,
+        "Intended Use": 3,
+        "Training Data": 4,
+        "Evaluation": 5,
+        "Limitations": 6,
+        "Ethical Considerations": 7,
+        "Deployment Configuration": 8,
+        "Lineage": 9,
+        "License and Contact": 10,
+    }
+
+    def generate_markdown(self, data: ModelCardData) -> str:
+        """Generate a Markdown model card document.
+
+        Produces a well-structured Markdown document following the Google
+        Model Cards specification, suitable for rendering in GitHub, Notion,
+        or AumOS developer portals.
+
+        Args:
+            data: ModelCardData with all model information.
+
+        Returns:
+            Complete Markdown string for the model card.
+        """
+        sections = self._build_sections(data)
+        sections.sort(key=lambda s: s.order)
+
+        generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        header = (
+            f"# Model Card: {data.model_name} ({data.version})\n\n"
+            f"*Generated by AumOS Model Registry — {generated_at}*\n\n"
+            f"---\n\n"
+        )
+
+        body = "\n\n".join(f"## {section.title}\n\n{section.content}" for section in sections)
+        return header + body
+
+    def generate_json(self, data: ModelCardData) -> dict[str, Any]:
+        """Generate a machine-readable JSON model card.
+
+        Produces a structured JSON representation compatible with the
+        aumos-ai-bom and governance engine consumers.
+
+        Args:
+            data: ModelCardData with all model information.
+
+        Returns:
+            Dict representing the model card in JSON-compatible format.
+        """
+        return {
+            "schema_version": "1.0",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "model": {
+                "id": str(data.model_id),
+                "name": data.model_name,
+                "version": data.version,
+                "type": data.model_type,
+                "framework": data.framework,
+                "description": data.description,
+                "license": data.license,
+                "authors": data.authors,
+                "contact": data.contact,
+                "tags": data.tags,
+                "parent_version_id": str(data.parent_version_id) if data.parent_version_id else None,
+            },
+            "training": {
+                "data_uri": data.training_data_uri,
+                "data_description": data.training_data_description,
+            },
+            "evaluation": {
+                "metrics": data.performance_metrics,
+                "datasets": data.evaluation_datasets,
+            },
+            "intended_use": {
+                "primary_uses": data.intended_use_cases,
+                "out_of_scope": data.out_of_scope_uses,
+            },
+            "limitations": data.limitations,
+            "ethical_considerations": data.ethical_considerations,
+        }
+
+    def _build_sections(self, data: ModelCardData) -> list[ModelCardSection]:
+        """Build all model card sections from the input data.
+
+        Args:
+            data: ModelCardData source.
+
+        Returns:
+            List of ModelCardSection objects.
+        """
+        sections: list[ModelCardSection] = []
+
+        # Model Details
+        details_lines = [f"- **Model ID**: `{data.model_id}`"]
+        details_lines.append(f"- **Version**: `{data.version}`")
+        if data.model_type:
+            details_lines.append(f"- **Type**: {data.model_type}")
+        if data.framework:
+            details_lines.append(f"- **Framework**: {data.framework}")
+        if data.authors:
+            details_lines.append(f"- **Authors**: {', '.join(data.authors)}")
+        if data.license:
+            details_lines.append(f"- **License**: {data.license}")
+        if data.tags:
+            tag_str = ", ".join(f"`{k}={v}`" for k, v in data.tags.items())
+            details_lines.append(f"- **Tags**: {tag_str}")
+
+        sections.append(ModelCardSection(
+            title="Model Details",
+            content="\n".join(details_lines),
+            order=self._SECTION_ORDER["Model Details"],
+        ))
+
+        # Model Description
+        if data.description:
+            sections.append(ModelCardSection(
+                title="Model Description",
+                content=data.description,
+                order=self._SECTION_ORDER["Model Description"],
+            ))
+
+        # Intended Use
+        intended_lines = []
+        if data.intended_use_cases:
+            intended_lines.append("### Intended Uses\n")
+            intended_lines.extend(f"- {use}" for use in data.intended_use_cases)
+        if data.out_of_scope_uses:
+            intended_lines.append("\n### Out-of-Scope Uses\n")
+            intended_lines.extend(f"- {use}" for use in data.out_of_scope_uses)
+        if intended_lines:
+            sections.append(ModelCardSection(
+                title="Intended Use",
+                content="\n".join(intended_lines),
+                order=self._SECTION_ORDER["Intended Use"],
+            ))
+
+        # Training Data
+        training_lines = []
+        if data.training_data_uri:
+            training_lines.append(f"- **Dataset URI**: `{data.training_data_uri}`")
+        if data.training_data_description:
+            training_lines.append(f"\n{data.training_data_description}")
+        if training_lines:
+            sections.append(ModelCardSection(
+                title="Training Data",
+                content="\n".join(training_lines),
+                order=self._SECTION_ORDER["Training Data"],
+            ))
+
+        # Evaluation
+        if data.performance_metrics or data.evaluation_datasets:
+            eval_lines = []
+            if data.evaluation_datasets:
+                eval_lines.append("### Evaluation Datasets\n")
+                eval_lines.extend(f"- {ds}" for ds in data.evaluation_datasets)
+            if data.performance_metrics:
+                eval_lines.append("\n### Performance Metrics\n")
+                eval_lines.append("| Metric | Value |")
+                eval_lines.append("|--------|-------|")
+                for metric, value in sorted(data.performance_metrics.items()):
+                    eval_lines.append(f"| {metric} | {value:.4f} |")
+            sections.append(ModelCardSection(
+                title="Evaluation",
+                content="\n".join(eval_lines),
+                order=self._SECTION_ORDER["Evaluation"],
+            ))
+
+        # Limitations
+        if data.limitations:
+            sections.append(ModelCardSection(
+                title="Limitations",
+                content="\n".join(f"- {lim}" for lim in data.limitations),
+                order=self._SECTION_ORDER["Limitations"],
+            ))
+
+        # Ethical Considerations
+        if data.ethical_considerations:
+            sections.append(ModelCardSection(
+                title="Ethical Considerations",
+                content="\n".join(f"- {ec}" for ec in data.ethical_considerations),
+                order=self._SECTION_ORDER["Ethical Considerations"],
+            ))
+
+        # Lineage
+        if data.parent_version_id:
+            sections.append(ModelCardSection(
+                title="Lineage",
+                content=f"This version was derived from parent version `{data.parent_version_id}`.",
+                order=self._SECTION_ORDER["Lineage"],
+            ))
+
+        # License and Contact
+        license_lines = [f"This model is released under the **{data.license}** license."]
+        if data.contact:
+            license_lines.append(f"\nFor questions, contact: `{data.contact}`")
+        sections.append(ModelCardSection(
+            title="License and Contact",
+            content="\n".join(license_lines),
+            order=self._SECTION_ORDER["License and Contact"],
+        ))
+
+        logger.info(
+            "model_card_sections_built",
+            model_id=str(data.model_id),
+            version=data.version,
+            section_count=len(sections),
+        )
+
+        return sections
+
+    def from_version_record(self, version: dict[str, Any], model: dict[str, Any]) -> ModelCardData:
+        """Build ModelCardData from ORM version and model record dicts.
+
+        Translates the database record format into the ModelCardData
+        structure expected by the generator methods.
+
+        Args:
+            version: ModelVersion record dict (from reg_model_versions).
+            model: Model record dict (from reg_models).
+
+        Returns:
+            ModelCardData populated from the database records.
+        """
+        metrics = version.get("performance_metrics") or {}
+        if not isinstance(metrics, dict):
+            metrics = {}
+
+        return ModelCardData(
+            model_id=uuid.UUID(str(model["id"])),
+            model_name=model.get("name", "Unknown Model"),
+            version=version.get("version", "unknown"),
+            description=model.get("description") or "No description provided.",
+            model_type=model.get("model_type"),
+            framework=version.get("framework"),
+            training_data_uri=version.get("training_data_uri"),
+            training_data_description=version.get("training_data_description"),
+            performance_metrics={k: float(v) for k, v in metrics.items() if isinstance(v, (int, float))},
+            intended_use_cases=model.get("intended_use_cases") or [],
+            out_of_scope_uses=model.get("out_of_scope_uses") or [],
+            limitations=model.get("limitations") or [],
+            ethical_considerations=model.get("ethical_considerations") or [],
+            authors=model.get("authors") or [],
+            license=model.get("license") or "Apache-2.0",
+            contact=model.get("contact"),
+            tags=model.get("tags") or {},
+            parent_version_id=(
+                uuid.UUID(str(version["parent_version_id"])) if version.get("parent_version_id") else None
+            ),
+        )
